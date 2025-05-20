@@ -1,48 +1,99 @@
 using System.Runtime.InteropServices;
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using RetakesAllocatorCore.Config;
+using RetakesAllocatorCore;
 using CounterStrikeSharp.API.Modules.Memory.DynamicFunctions;
+using System.Text.Json;
+// ReSharper disable InconsistentNaming
 
 namespace RetakesAllocator;
 
 public class CustomGameData
 {
-    private static Dictionary<string, Dictionary<OSPlatform, string>> _customGameData = new()
-    {
-        // Thank you to @Whaliin https://github.com/CS2Plugins/WeaponRestrict/blob/main/WeaponRestrict.json
-        {
-            "GiveNamedItem2",
-            new()
-            {
-                {
-                    OSPlatform.Windows,
-                    @"\x48\x83\xEC\x38\x48\xC7\x44\x24\x28\x00\x00\x00\x00\x45\x33\xC9\x45\x33\xC0\xC6\x44\x24\x20\x00\xE8\x2A\x2A\x2A\x2A\x48\x85"
-                },
-                {
-                    OSPlatform.Linux,
-                    @"\x55\x48\x89\xE5\x41\x57\x41\x56\x4D\x89\xC6\x41\x55\x49\x89\xF5\x41\x54\x49\x89\xD4"
-                },
-            }
-        }
-    };
-
-    private readonly MemoryFunctionVoid<IntPtr, string, IntPtr, IntPtr, IntPtr, IntPtr, IntPtr, IntPtr> GiveNamedItem2;
-
-    public readonly
-        MemoryFunctionWithReturn<CCSPlayer_ItemServices, CEconItemView, AcquireMethod, NativeObject, AcquireResult>
-        CCSPlayer_ItemServices_CanAcquireFunc = new(GameData.GetSignature("CCSPlayer_ItemServices_CanAcquire"));
-
-    public readonly MemoryFunctionWithReturn<int, string, CCSWeaponBaseVData> GetCSWeaponDataFromKeyFunc = new(GameData.GetSignature("GetCSWeaponDataFromKey"));
+    private static readonly Dictionary<string, Dictionary<OSPlatform, string>> _customGameData = new();
+    private MemoryFunctionVoid<IntPtr, string, IntPtr, IntPtr, IntPtr, IntPtr, IntPtr, IntPtr>? GiveNamedItem2;
+    public MemoryFunctionWithReturn<CCSPlayer_ItemServices, CEconItemView, AcquireMethod, NativeObject, AcquireResult>? CCSPlayer_ItemServices_CanAcquireFunc;
+    public MemoryFunctionWithReturn<int, string, CCSWeaponBaseVData>? GetCSWeaponDataFromKeyFunc;
 
     public CustomGameData()
     {
-        GiveNamedItem2 = new(GetCustomGameDataKey("GiveNamedItem2"));
+        LoadCustomGameData();
+    }
+
+    public void LoadCustomGameData()
+    {
+        if (Configs.Shared.Module == null)
+        {
+            Log.Error("Module path is null. Returning without loading custom game data.");
+            return;
+        }
+        var jsonFilePath = Path.Combine(Configs.Shared.Module, "gamedata/RetakesAllocator_gamedata.json");
+        if (File.Exists(jsonFilePath))
+        {
+            try
+            {
+                var jsonData = File.ReadAllText(jsonFilePath);
+                var jsonDocument = JsonDocument.Parse(jsonData);
+            
+                foreach (var element in jsonDocument.RootElement.EnumerateObject())
+                {
+                    string key = element.Name;
+
+                    var platformData = new Dictionary<OSPlatform, string>();
+
+                    if (element.Value.TryGetProperty("signatures", out var signatures))
+                    {
+                        if (signatures.TryGetProperty("windows", out var windows))
+                        {
+                            platformData[OSPlatform.Windows] = windows.GetString()!;
+                        }
+
+                        if (signatures.TryGetProperty("linux", out var linux))
+                        {
+                            platformData[OSPlatform.Linux] = linux.GetString()!;
+                        }
+                    }
+                    _customGameData[key] = platformData;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"Error loading custom game data: {ex.Message}");
+            }
+        }
+        else
+        {
+            Log.Debug($"JSON file does not exist at path: {jsonFilePath}. Returning without loading custom game data.");
+        }
+        
+        try
+        {
+            GiveNamedItem2 = new(GetCustomGameDataKey("GiveNamedItem2"));
+        }
+        catch
+        {
+            // GiveNamedItem2 failing to load shouldnt crash because we will try to fallback to GiveNamedItem
+        }
+        GetCSWeaponDataFromKeyFunc = new(GetCustomGameDataKey("GetCSWeaponDataFromKey"));
+        CCSPlayer_ItemServices_CanAcquireFunc = new(GetCustomGameDataKey("CCSPlayer_ItemServices_CanAcquire"));
     }
 
     private string GetCustomGameDataKey(string key)
     {
         if (!_customGameData.TryGetValue(key, out var customGameData))
         {
+            try
+            {
+                var defaultGameData = GameData.GetSignature(key);
+                Log.Info($"Using default gamedata for {key} because no custom data was found.");
+                return defaultGameData;
+            }
+            catch
+            {
+                // ignored
+            }
+
             throw new Exception($"Invalid key {key}");
         }
 
@@ -65,6 +116,11 @@ public class CustomGameData
             : throw new Exception($"Missing custom data for {key} on {platform}");
     }
 
+    public bool PlayerGiveNamedItemEnabled()
+    {
+        return GiveNamedItem2 != null;
+    }
+
     public void PlayerGiveNamedItem(CCSPlayerController player, string item)
     {
         if (!player.PlayerPawn.IsValid) return;
@@ -73,7 +129,7 @@ public class CustomGameData
         if (player.PlayerPawn.Value.ItemServices == null) return;
 
         // Log.Debug("Using custom function for GiveNamedItem2");
-        GiveNamedItem2.Invoke(player.PlayerPawn.Value.ItemServices.Handle, item, 0, 0, 0, 0, 0, 0);
+        GiveNamedItem2?.Invoke(player.PlayerPawn.Value.ItemServices.Handle, item, 0, 0, 0, 0, 0, 0);
     }
 }
 
